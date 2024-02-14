@@ -52,7 +52,7 @@ mapApp f (Wait x) y = Wait (mapApp f x y)
 public export
 Semigroup (KStream a) where
   (x :: y) <+> ys = x :: (y <+> ys)
-  [] <+> ys       = []
+  [] <+> ys       = ys
   (Wait x) <+> ys = Wait (x <+> ys)
 
 public export
