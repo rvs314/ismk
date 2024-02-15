@@ -45,6 +45,32 @@ Persist Val where
   persist (Sym str) = Sym str
   persist (Var nm)  = Var $ persist nm
 
+DecEq (Val s) where
+  decEq [] [] = Yes Refl
+  decEq [] (x :: y) = No (\case Refl impossible)
+  decEq [] (Sym str) = No (\case Refl impossible)
+  decEq [] (Var x) = No (\case Refl impossible)
+  decEq (x :: y) (z :: w) with (decEq x z, decEq y w)
+    decEq (x :: w) (x :: w) | ((Yes Refl), (Yes Refl)) = Yes Refl
+    decEq (x :: y) (z :: w) | ((Yes prf), (No contra)) = No (\case Refl => contra Refl)
+    decEq (x :: y) (z :: w) | ((No contra), (Yes prf)) = No (\case Refl => contra Refl)
+    decEq (x :: y) (z :: w) | ((No contra), (No f)) = No (\case Refl => contra Refl)
+  decEq (x :: y) [] = No (\case Refl impossible)
+  decEq (x :: y) (Sym str) = No (\case Refl impossible)
+  decEq (x :: y) (Var z) = No (\case Refl impossible)
+  decEq (Sym str) (Sym str1) with (decEq str str1)
+    decEq (Sym str) (Sym str) | (Yes Refl) = Yes Refl
+    decEq (Sym str) (Sym str1) | (No contra) = No (\case Refl => contra Refl)
+  decEq (Sym str) [] = No (\case Refl impossible)
+  decEq (Sym str) (x :: y) = No (\case Refl impossible)
+  decEq (Sym str) (Var x) = No (\case Refl impossible)
+  decEq (Var x) (Var y) with (decEq x y)
+    decEq (Var x) (Var x) | (Yes Refl) = Yes Refl
+    decEq (Var x) (Var y) | (No contra) = No (\case Refl => contra Refl)
+  decEq (Var x) [] = No (\case Refl impossible)
+  decEq (Var x) (y :: z) = No (\case Refl impossible)
+  decEq (Var x) (Sym str) = No (\case Refl impossible)
+
 record Trail (s : Stage) where
   constructor MkTrail
   unTrail : List (Name s, Val s)
@@ -59,13 +85,32 @@ infix 6 =:=
 data Goal : Stage -> Type where
   Fail : Goal s 
   Succeed : Goal s 
-  (=:=) : Val s -> Val s -> Goal s
-  (/\) : Lazy (Goal s) -> Lazy (Goal s) -> Goal s
-  (\/) : Lazy (Goal s) -> Lazy (Goal s) -> Goal s
+  Unify : Val s -> Val s -> Goal s
+  And : (Goal s) -> (Goal s) -> Goal s
+  Or : (Goal s) -> (Goal s) -> Goal s
   Fresh : (Name s -> Goal s) -> Goal s
   Later : Goal RunTime -> Goal StagingTime
   Gather : Goal StagingTime -> Goal StagingTime
   Fallback : Goal StagingTime -> Goal StagingTime
+
+(=:=) : Val s -> Val s -> Goal s
+l =:= r with (decEq l r)
+  l =:= r | (Yes prf) = Succeed
+  l =:= r | (No contra) = Unify l r
+
+(\/) : Goal s -> Goal s -> Goal s
+Succeed \/ r = Succeed
+l \/ Succeed = Succeed
+Fail \/ r = r
+l \/ Fail = l
+l \/ r = Or l r
+
+(/\) : Goal s -> Goal s -> Goal s
+Fail /\ r = Fail
+Succeed /\ r = r
+l /\ Fail = Fail
+l /\ Succeed = l
+l /\ r = And l r
 
 fresh : (Val s -> Goal s) -> Goal s
 fresh f = Fresh (f . Var)
@@ -73,19 +118,19 @@ fresh f = Fresh (f . Var)
 Persist Goal where
   persist Fail = Fail
   persist Succeed = Succeed
-  persist (x =:= y) = persist x =:= persist y
-  persist (x /\ y) = persist x /\ persist y
-  persist (x \/ y) = persist x \/ persist y
+  persist (Unify x y) = persist x =:= persist y
+  persist (And x y) = persist x /\ persist y
+  persist (Or x y) = persist x \/ persist y
   persist (Fresh f) = Fresh (\case (MkName nm) => persist $ f (MkName nm))
   persist (Later x) = x
   persist (Gather x) = persist x
   persist (Fallback x) = persist x
 
 disj : List (Goal s) -> Goal s
-disj = foldl ((\/) `on` delay) Fail
+disj = foldl (\/) Fail
 
 conj : List (Goal s) -> Goal s
-conj = foldl ((/\) `on` delay) Succeed
+conj = foldl (/\) Succeed
 
 data FallbackStatus = OutsideFallback | InsideFallback
 
@@ -147,12 +192,16 @@ passOnFallback : State StagingTime -> Lazy (KStream (State StagingTime)) -> KStr
 passOnFallback s@(MkState trail counter (x, InsideFallback)) y  = [s]
 passOnFallback (MkState trail counter (x, OutsideFallback)) y = Force y
 
+collapse : State StagingTime -> Goal RunTime 
+collapse (MkState trail counter (code, fallbackStatus)) = 
+  code /\ conj (map (\(nm, vl) => Var (persist nm) =:= persist vl) (unTrail trail))
+
 interpret : Goal s -> (State s) -> KStream (State s)
 interpret Fail y = []
 interpret Succeed y = [y]
-interpret (x =:= z) y = unify x z y
-interpret (x /\ z) y = interpret x y >>= interpret z
-interpret (x \/ z) y = interpret x y <|> interpret z y
+interpret (Unify x z) y = unify x z y
+interpret (And x z) y = (Wait (interpret x y)) >>= interpret z
+interpret (Or x z) y = interpret x y <|> interpret z y
 interpret (Fresh f) y = let (fresh, st) = gensym y in 
                         interpret (f fresh) st
 interpret {s=StagingTime} (Later x) s@(MkState trail counter (code, fbs)) = 
@@ -161,7 +210,7 @@ interpret {s=StagingTime} (Gather x) y =
   passOnFallback y $
   let options = toList forever $ interpret x y in 
   [ MkState (trail y) (counter y) 
-            (disj $ map (\case (MkState _ _ (c, _)) => c) options, OutsideFallback) ]
+            (disj $ map collapse options, OutsideFallback) ]
 interpret {s=StagingTime} (Fallback x) y = 
   passOnFallback y $
   case take forever 2 $ interpret x ({ payload $= mapSnd (const InsideFallback) } y) of
