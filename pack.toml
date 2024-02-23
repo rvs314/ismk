@@ -1,3 +1,9 @@
+[custom.all.istream]
+type = "local"
+path = "/home/rvs314/Code/istream"
+ipkg = "istream.ipkg"
+test = "test/test.ipkg"
+
 [custom.all.ismk]
 type = "local"
 path = "."

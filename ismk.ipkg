@@ -13,7 +13,9 @@ version = 0.1.0
 -- langversion
 
 -- packages to add to search path
-depends = base, contrib, sop, elab-util
+depends = sop
+        , elab-util
+        , istream
 
 -- modules to install
 modules = Ismk

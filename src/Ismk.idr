@@ -1,119 +1,166 @@
 module Ismk
 
-import KStream
+import IStream
 import Decidable.Equality
 import Data.Fuel
+import Data.Vect
 
+%default total
+
+public export
 data Stage = StagingTime | RunTime
 
-interface Persist (k : Stage -> Type) where
+public export
+interface Persist (k : (0 s : Stage) -> Type) where
   persist : k StagingTime -> k RunTime
 
-record Name (s : Stage) where
+public export
+record Name (0 s : Stage) where
   constructor MkName
   unName : Nat
 
+public export
 DecEq (Name s) where
   decEq (MkName k) (MkName j) with (decEq k j)
     decEq (MkName k) (MkName k) | (Yes Refl) = Yes Refl
     decEq (MkName k) (MkName j) | (No contra) = No (\case Refl => contra Refl)
 
+public export
 Eq (Name s) where
   (==) = (==) `on` unName
 
+public export
 Ord (Name s) where
   compare = compare `on` unName
 
+public export
 Persist Name where
   persist (MkName unName) = MkName unName
 
+public export
 incr : Name s -> Name s
 incr (MkName k) = MkName (S k)
 
-data Val : Stage -> Type where
+public export
+data Val : (0 _ : Stage) -> Type where
   Nil  : Val s
+  Numb : Integer -> Val s
   (::) : Val s -> Val s -> Val s
   Sym  : String -> Val s
   Var  : Name s -> Val s
 
+export
 FromString (Val s) where
   fromString = Sym
 
+export
+fromInteger : Integer -> Val s
+fromInteger = Numb
+
+public export
 Persist Val where 
   persist []        = []
   persist (x :: y)  = persist x :: persist y
   persist (Sym str) = Sym str
+  persist (Numb n)  = Numb n
   persist (Var nm)  = Var $ persist nm
 
-DecEq (Val s) where
-  decEq [] [] = Yes Refl
-  decEq [] (x :: y) = No (\case Refl impossible)
-  decEq [] (Sym str) = No (\case Refl impossible)
-  decEq [] (Var x) = No (\case Refl impossible)
-  decEq (x :: y) (z :: w) with (decEq x z, decEq y w)
-    decEq (x :: w) (x :: w) | ((Yes Refl), (Yes Refl)) = Yes Refl
-    decEq (x :: y) (z :: w) | ((Yes prf), (No contra)) = No (\case Refl => contra Refl)
-    decEq (x :: y) (z :: w) | ((No contra), (Yes prf)) = No (\case Refl => contra Refl)
-    decEq (x :: y) (z :: w) | ((No contra), (No f)) = No (\case Refl => contra Refl)
-  decEq (x :: y) [] = No (\case Refl impossible)
-  decEq (x :: y) (Sym str) = No (\case Refl impossible)
-  decEq (x :: y) (Var z) = No (\case Refl impossible)
-  decEq (Sym str) (Sym str1) with (decEq str str1)
-    decEq (Sym str) (Sym str) | (Yes Refl) = Yes Refl
-    decEq (Sym str) (Sym str1) | (No contra) = No (\case Refl => contra Refl)
-  decEq (Sym str) [] = No (\case Refl impossible)
-  decEq (Sym str) (x :: y) = No (\case Refl impossible)
-  decEq (Sym str) (Var x) = No (\case Refl impossible)
-  decEq (Var x) (Var y) with (decEq x y)
-    decEq (Var x) (Var x) | (Yes Refl) = Yes Refl
-    decEq (Var x) (Var y) | (No contra) = No (\case Refl => contra Refl)
-  decEq (Var x) [] = No (\case Refl impossible)
-  decEq (Var x) (y :: z) = No (\case Refl impossible)
-  decEq (Var x) (Sym str) = No (\case Refl impossible)
+public export
+Eq (Val s) where
+  [] == [] = True
+  (x :: y) == (z :: w) = x == z && y == w
+  (Sym str) == (Sym str1) = str == str1
+  (Var x) == (Var y) = x == y
+  (Numb k) == (Numb j) = k == j
+  _ == _ = False
 
-record Trail (s : Stage) where
+-- TODO: Rename to 'Substitution'
+public export
+record Trail (0 s : Stage) where
   constructor MkTrail
   unTrail : List (Name s, Val s)
 
+public export
 Persist Trail where
   persist = MkTrail . map (bimap persist persist) . unTrail
 
-infixr 2 /\ 
-infixl 3 \/ 
+infixr 3 /\ 
+infixl 2 \/ 
 infix 6 =:=
 
-data Goal : Stage -> Type where
+public export
+data Goal : (0 s : Stage) -> Type where
   Fail : Goal s 
   Succeed : Goal s 
   Unify : Val s -> Val s -> Goal s
-  And : (Goal s) -> (Goal s) -> Goal s
-  Or : (Goal s) -> (Goal s) -> Goal s
+  And : Lazy (Goal s) -> Lazy (Goal s) -> Goal s
+  Or : Lazy (Goal s) -> Lazy (Goal s) -> Goal s
   Fresh : (Name s -> Goal s) -> Goal s
   Later : Goal RunTime -> Goal StagingTime
   Gather : Goal StagingTime -> Goal StagingTime
   Fallback : Goal StagingTime -> Goal StagingTime
 
+export
+(\/) : Lazy (Goal s) -> Lazy (Goal s) -> Lazy (Goal s)
+x \/ y = Or x y
+-- (Delay Succeed) \/ (Delay r) = Succeed
+-- (Delay l)       \/ (Delay Succeed) = Succeed
+-- (Delay Fail)    \/ (Delay r = r
+-- (Delay l) \/ (Delay r) = Or l r
+-- (Delay Succeed) \/ r = Delay Succeed
+-- l \/ Succeed = Succeed
+-- Fail \/ r = r
+-- l \/ Fail = l
+-- l \/ r = Or l r
+
+export
+(/\) : Lazy (Goal s) -> Lazy (Goal s) -> Lazy (Goal s)
+x /\ y = And x y
+
+export
 (=:=) : Val s -> Val s -> Goal s
-l =:= r with (decEq l r)
-  l =:= r | (Yes prf) = Succeed
-  l =:= r | (No contra) = Unify l r
+[] =:= [] = Succeed
+[] =:= (Var x) = Unify [] (Var x)
+[] =:= _ = Fail
+(Numb i) =:= (Numb j) = if i == j then Succeed else Fail
+(Numb i) =:= (Var x) = Unify (Numb i) (Var x)
+(Numb i) =:= _ = Fail
+(x :: z) =:= (w :: y) = x =:= w /\ z =:= y 
+l@(x :: z) =:= r@(Var n) = Unify l r
+(x :: z) =:= _ = Fail
+(Sym str) =:= (Sym str1) = if str == str1 then Succeed else Fail
+l@(Sym str) =:= r@(Var x) = Unify l r
+(Sym str) =:= _ = Fail
+(Var x) =:= y = Unify (Var x) y
 
-(\/) : Goal s -> Goal s -> Goal s
-Succeed \/ r = Succeed
-l \/ Succeed = Succeed
-Fail \/ r = r
-l \/ Fail = l
-l \/ r = Or l r
-
-(/\) : Goal s -> Goal s -> Goal s
-Fail /\ r = Fail
-Succeed /\ r = r
-l /\ Fail = Fail
-l /\ Succeed = l
-l /\ r = And l r
-
+export
 fresh : (Val s -> Goal s) -> Goal s
 fresh f = Fresh (f . Var)
+
+export
+freshN : (n : Nat) -> (Vect n (Val s) -> Goal s) -> Goal s
+freshN 0 f = f []
+freshN (S k) f = fresh $ \a => freshN k $ \as => f (a :: as)
+
+export
+succeed : Goal s  
+succeed = Succeed
+ 
+export   
+fail : Goal s  
+fail = Fail
+
+export
+later : Goal RunTime -> Goal StagingTime
+later = Later
+
+export
+gather : Goal StagingTime -> Goal StagingTime
+gather = Gather
+
+export
+fallback : Goal StagingTime -> Goal StagingTime
+fallback = Fallback
 
 Persist Goal where
   persist Fail = Fail
@@ -121,16 +168,22 @@ Persist Goal where
   persist (Unify x y) = persist x =:= persist y
   persist (And x y) = persist x /\ persist y
   persist (Or x y) = persist x \/ persist y
-  persist (Fresh f) = Fresh (\case (MkName nm) => persist $ f (MkName nm))
+  persist (Fresh f) = Fresh (persist . f . unPersist)
+    where
+      -- This is a "staging unsafe" operation
+      unPersist : Name RunTime -> Name StagingTime
+      unPersist = MkName . unName
   persist (Later x) = x
   persist (Gather x) = persist x
   persist (Fallback x) = persist x
 
-disj : List (Goal s) -> Goal s
-disj = foldl (\/) Fail
+public export
+disj : List (Lazy (Goal s)) -> Lazy (Goal s)
+disj = foldl (\/) fail
 
-conj : List (Goal s) -> Goal s
-conj = foldl (/\) Succeed
+public export
+conj : List (Lazy (Goal s)) -> Lazy (Goal s)
+conj = foldl (/\) succeed
 
 data FallbackStatus = OutsideFallback | InsideFallback
 
@@ -138,7 +191,8 @@ Payload : Stage -> Type
 Payload StagingTime = (Goal RunTime, FallbackStatus)
 Payload RunTime = ()
 
-record State (s : Stage) where
+public export
+record State (0 s : Stage) where
   constructor MkState
   trail : Trail s
   counter : Name s
@@ -147,6 +201,7 @@ record State (s : Stage) where
 Persist State where
   persist (MkState trail counter payload) = MkState (persist trail) (persist counter) ()
 
+public export
 empty : {s : Stage} -> State s
 empty {s} = MkState (MkTrail []) (MkName 0) (payload s)
   where
@@ -154,41 +209,60 @@ empty {s} = MkState (MkTrail []) (MkName 0) (payload s)
     payload StagingTime = (Succeed, OutsideFallback)
     payload RunTime = ()
 
+-- ext-S
+public export
 bind : Name s -> Val s -> State s -> State s
 bind n v (MkState (MkTrail bindings) counter payload) = 
      MkState (MkTrail ((n, v) :: bindings)) counter payload
 
+public export
 gensym : State s -> (Name s, State s)
 gensym (MkState trail counter payload) = (counter, MkState trail (incr counter) payload)
 
+-- gensymN : (n : Nat) -> State s -> (Vect n (Name s), State s)
+-- gensymN 0 x = ([], x)
+-- gensymN (S k) x = let (ks, x')  = gensymN k x
+--                       (k,  x'') = gensym x'
+--                   in (k :: ks, x'')
+
+public export
 walk : (trail : Trail s) -> (val : Val s) -> Val s
 walk (MkTrail []) (Var x) = Var x
-walk (MkTrail ((nm, z) :: xs)) (Var x) with (decEq nm x)
-  walk (MkTrail ((nm, z) :: xs)) (Var nm) | (Yes Refl) = walk (MkTrail xs) z
-  walk (MkTrail ((nm, z) :: xs)) (Var x)  | (No contra) = walk (MkTrail xs) (Var x)
+walk t@(MkTrail ((nm, z) :: xs)) (Var x) with (decEq nm x)
+  walk t@(MkTrail ((nm, z) :: xs)) (Var nm) | (Yes Refl) = 
+    walk (assert_smaller t (MkTrail xs)) z
+  walk t@(MkTrail ((nm, z) :: xs)) (Var x)  | (No contra) = 
+    walk (assert_smaller t (MkTrail xs)) (Var x)
 walk trail con = con
 
+public export
 walks : (trail : Trail s) -> (val : Val s) -> Val s
 walks trail val with (walk trail val)
-  walks trail val | [] = []
-  walks trail val | (x :: y) = walk trail x :: walk trail y
-  walks trail val | (Sym     str) = val
-  walks trail val | (Var     x) = val
+  walks trail val | []         = []
+  walks trail val | (x :: y)   = walks trail (assert_smaller val x) :: walks trail (assert_smaller val y)
+  walks trail val | (Sym  str) = (Sym str)
+  walks trail val | (Var  x)   = Var x
+  walks trail val | (Numb n)   = Numb n
 
-unify : Val s -> Val s -> State s -> KStream (State s)
+public export
+unify : Val s -> Val s -> State s -> IStream (State s)
 unify l r z with (walk (trail z) l, walk (trail z) r)
   unify l r z | ((Var x), (Var y)) = 
                 let mx = max x y
                     mn = min x y
                 in [bind mx (Var mn) z]
-  unify l r z | (x, y@(Var _))     = unify y x z
+  unify l r z | (x, y@(Var _))     = 
+    unify (assert_smaller r y) (assert_smaller l x) z
   unify l r z | ((Var x),    y)    = [bind x y z]
   unify l r z | ((Sym str),  (Sym str1)) = if str == str1 then [z] else []
-  unify l r z | ((a :: d), (p :: q)) = unify a p z >>= unify d q
+  unify l r z | ((a :: d), (p :: q)) = 
+    unify (assert_smaller l a) (assert_smaller r p) z 
+      >>= unify (assert_smaller l d) (assert_smaller r q)
   unify l r z | ([],         [])   = [z]
   unify l r z | (_,         _)    = []
 
-passOnFallback : State StagingTime -> Lazy (KStream (State StagingTime)) -> KStream (State StagingTime)
+public export
+passOnFallback : State StagingTime -> Lazy (IStream (State StagingTime)) -> IStream (State StagingTime)
 passOnFallback s@(MkState trail counter (x, InsideFallback)) y  = [s]
 passOnFallback (MkState trail counter (x, OutsideFallback)) y = Force y
 
@@ -196,41 +270,71 @@ collapse : State StagingTime -> Goal RunTime
 collapse (MkState trail counter (code, fallbackStatus)) = 
   code /\ conj (map (\(nm, vl) => Var (persist nm) =:= persist vl) (unTrail trail))
 
-interpret : Goal s -> (State s) -> KStream (State s)
-interpret Fail y = []
-interpret Succeed y = [y]
-interpret (Unify x z) y = unify x z y
-interpret (And x z) y = (Wait (interpret x y)) >>= interpret z
-interpret (Or x z) y = interpret x y <|> interpret z y
-interpret (Fresh f) y = let (fresh, st) = gensym y in 
-                        interpret (f fresh) st
-interpret {s=StagingTime} (Later x) s@(MkState trail counter (code, fbs)) = 
+public export
+interpret : Fuel -> Goal s -> State s -> IStream (State s)
+interpret k Fail y = []
+interpret k Succeed y = [y]
+interpret k (Unify x z) y = unify x z y
+interpret k (And x z) y = (Wait (interpret k x y)) >>= interpret k z
+interpret k (Or x z) y = interpret k x y <|> interpret k z y
+interpret k (Fresh f) y = let (fresh, st) = gensym y in 
+                        interpret k (f fresh) st
+interpret {s=StagingTime} k (Later x) s@(MkState trail counter (code, fbs)) = 
   [ MkState trail counter ((x /\ code), fbs) ]
-interpret {s=StagingTime} (Gather x) y = 
+interpret {s=StagingTime} k (Gather x) y = 
   passOnFallback y $
-  let options = toList forever $ interpret x y in 
-  [ MkState (trail y) (counter y) 
-            (disj $ map collapse options, OutsideFallback) ]
-interpret {s=StagingTime} (Fallback x) y = 
+  case toList k $ interpret k x y of
+    [] => []
+    [x] => [x]
+    options => [ MkState (trail y) (counter y) 
+                         (disj $ map (delay . collapse) options, OutsideFallback) ]
+interpret {s=StagingTime} k (Fallback x) y = 
   passOnFallback y $
-  case take forever 2 $ interpret x ({ payload $= mapSnd (const InsideFallback) } y) of
+  case take k 2 $ interpret k x ({ payload $= mapSnd (const InsideFallback) } y) of
     []  => []
     [x] => [x]
-    _   => interpret (Later (persist x)) y
+    _   => interpret k (assert_smaller x (Later (persist x))) y
 
 Error : Type
 Error = String
 
-run : Goal RunTime -> KStream (State RunTime)
-run x = interpret x empty
+public export
+run : Fuel -> (Val RunTime -> Goal RunTime) -> IStream (Val RunTime)
+run k x = (\case (MkState trail counter payload) => walks trail (Var (MkName 0))) 
+      <$> interpret k (fresh x) empty
 
-runStaged : Goal StagingTime -> Either Error (KStream (State RunTime))
-runStaged x = let results = interpret x empty
-                  result = !(case fst $ split forever 2 results of
-                              []  => Left "Staging failed"
-                              [x] => Right x
-                              _   => Left "Staging was non-deterministic")
-              in pure $ interpret (fst (payload result)) $ persist result
+-- public export
+-- runN : (n : Nat) -> 
 
-oneOrTwoO : Goal s
-oneOrTwoO = fresh $ \x => x =:= "one" \/ x =:= "two"
+public export
+stage : Fuel -> Goal StagingTime -> Either Error (Goal RunTime, State RunTime)
+stage k x = let cases = interpret k x empty in
+            case split k 2 cases of
+              ([],  z) => Left "Staging Failed"
+              ([y], z) => Right (fst $ payload y, persist y)
+              (_,   z) => Left "Staging was non-deterministic"
+
+public export
+runStaged : Fuel -> Goal StagingTime -> Either Error (IStream (State RunTime))
+runStaged f x = uncurry (interpret f) <$> stage f x
+
+public export
+Relation : (arity : Nat) -> {stage : Stage} -> Type
+Relation 0 {stage = stage} = Goal stage
+Relation (S k) {stage = stage} = Val stage -> Relation k {stage=stage}
+  
+{-
+(run 1 (q)              ;; q is later
+ (staged
+  (fresh (x)            ;; x is now
+    (gather
+      (conde
+        [(fresh (y) (== x y) (== y 1))]
+        [(fresh (y) (== x 2) (== y 2))]))    ;; now unification
+    (== x q)))) ;; later unification, with csp of x
+
+
+(let ((y 3))
+  (staged (lambda (x) y))
+  (set! y 4))
+-}
